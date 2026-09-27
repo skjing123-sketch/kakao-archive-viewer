@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self' https://www.googleapis.com https://oauth2.googleapis.com; worker-src 'self'; manifest-src 'self'; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f5f0" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#16171a" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="카카오톡 사진·동영상과 대화를 날짜별로 모아 보는 나만의 보관함">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="카톡보관함">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="format-detection" content="telephone=no">
+  <title>카톡 보관함</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="modulepreload" href="js/data/settings.js">
+  <link rel="modulepreload" href="js/data/cache.js">
+  <link rel="modulepreload" href="js/data/source.js">
+  <link rel="modulepreload" href="js/data/archive.js">
+  <link rel="modulepreload" href="js/data/ktp.js">
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <div id="splash" aria-hidden="true">
+    <div>
+      <img src="icons/icon-192.png" alt="" width="84" height="84">
+      <p>카톡 보관함</p>
+    </div>
+  </div>
+  <div id="app"></div>
+  <noscript>
+    <p class="noscript">카톡 보관함을 보려면 자바스크립트를 켜 주세요.</p>
+  </noscript>
+</body>
+</html>

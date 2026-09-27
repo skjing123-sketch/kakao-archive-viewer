@@ -1,0 +1,25 @@
+{
+  "id": "./",
+  "name": "카톡 보관함",
+  "short_name": "카톡보관함",
+  "description": "카카오톡 사진·동영상과 대화를 날짜별로 모아 보는 나만의 보관함",
+  "lang": "ko",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f7f5f0",
+  "theme_color": "#f7f5f0",
+  "categories": ["photo", "utilities", "social"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "채팅방", "short_name": "채팅방", "url": "./#/rooms", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "검색", "short_name": "검색", "url": "./#/search", "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}
