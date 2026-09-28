@@ -211,6 +211,62 @@ export function keepShown(rows, shown, key) {
   return (rows || []).filter((r) => { const s = shown.get(r.id); return !s || s.key === key; });
 }
 
+// ---------------------------------------------------------------------------
+// Low-quality duplicates (chunk media fields `lq` / `lqs`, SPEC §13.5, set by the publisher)
+// ---------------------------------------------------------------------------
+//
+// `lq`  = media id of the BEST copy of the same picture somewhere in the archive, on every
+//         strictly worse copy (a thumbnail-only copy of a photo whose original was kept
+//         elsewhere, a smaller re-sent/forwarded copy, the poster of a video whose file is
+//         kept in another message); the best copy itself never carries it;
+// `lqs` = true (only with `lq`) when a strictly better copy is referenced in the SAME room —
+//         the best one, or another copy of the same picture (same `lq`) of higher quality.
+// Galleries hide these rows by default ("원본화질이 있는 사진은 저화질 중복으로 안보이게");
+// chats keep them (the conversation's context) and the media viewer opens the better copy.
+
+/** localStorage preference (dom.js prefs key): show low-quality duplicates in galleries. */
+export const SHOW_LQ_PREF = 'gallery.showLq';
+
+/** Media id of the best copy of `row`'s picture (chunk field `lq`) when `row` is a worse copy, else null. */
+export function betterCopyId(row) {
+  const v = row && row.lq;
+  return typeof v === 'string' && v.length > 0 && v.length <= 64 && v !== row.id ? v : null;
+}
+
+/** Is `row` a low-quality duplicate at all (a better copy exists somewhere)? */
+export function isLowQualityDup(row) {
+  return !!row && (betterCopyId(row) !== null || row.lqs === true);
+}
+
+/**
+ * Does a gallery hide `row` as a low-quality duplicate? `scope` 'all' — the home timeline
+ * over every room: a better copy exists anywhere (lq); 'rooms' — one room or a chosen set
+ * of rooms: only when the better copy is in the same room (lqs), because a copy in a room
+ * that is not shown must never hide the only visible one. Starred rows are never hidden.
+ */
+export function isHiddenLowQuality(row, scope, starred = false) {
+  if (!row || starred) return false;
+  if (row.lqs === true) return true;
+  return scope === 'all' && betterCopyId(row) !== null;
+}
+
+/**
+ * Gallery rows without the hidden low-quality duplicates (see isHiddenLowQuality).
+ * `isStarred(row)` keeps starred rows; `show` = the '저화질 중복 사진 보기' preference.
+ * @returns {{rows: object[], hidden: object[]}} rows kept (same order) and rows hidden
+ */
+export function hideLowQuality(rows, { scope = 'all', isStarred = null, show = false } = {}) {
+  const list = rows || [];
+  if (show) return { rows: list, hidden: [] };
+  const out = [];
+  const hidden = [];
+  for (const r of list) {
+    if (isHiddenLowQuality(r, scope) && !(isStarred && isStarred(r))) hidden.push(r);
+    else out.push(r);
+  }
+  return { rows: out, hidden };
+}
+
 /** Does a media row have something the viewer can load (original or preview)? */
 export function hasFullMedia(row) {
   return !!(row && ((row.orig !== false && !!row.p) || row.pv));

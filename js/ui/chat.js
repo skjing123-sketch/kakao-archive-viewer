@@ -778,9 +778,14 @@ export class ChatView {
     return true;
   }
 
-  /** Viewer list: photos/videos of the loaded months in chronological order. */
+  /**
+   * Viewer list: photos/videos of the loaded months in chronological order. The bubbles
+   * keep each message's own thumbnail; the viewer shows the better copy of a low-quality
+   * duplicate (chunk field lq) in its place (`upgrade`).
+   */
   viewerProvider() {
     return {
+      upgrade: true,
       list: () => {
         const out = [];
         for (let i = this.lo; i <= this.hi && i >= 0; i++) {

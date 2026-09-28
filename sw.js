@@ -55,9 +55,9 @@
 (function (g) {
   'use strict';
 
-  var VERSION = '2026.09.27-6-peffd0e969e';
+  var VERSION = '2026.09.28-2-p4640867fca';
   // Fingerprint of SHELL_FILES (see the header comment; tests/test_pwa_int.py keeps it honest).
-  var SHELL_HASH = '287cc8644970abeb';
+  var SHELL_HASH = 'a4a2ae7229182b96';
   var SHELL_PREFIX = 'kb-shell-';
   var SHELL_CACHE = SHELL_PREFIX + VERSION + '-' + SHELL_HASH;
   var MEDIA_CACHE = 'kb-media-v1';

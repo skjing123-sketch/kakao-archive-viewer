@@ -1,4 +1,4 @@
-// widgets.js — small reusable controls: segmented control and single-choice chip group.
+// widgets.js — small reusable controls: segmented control, single-choice chip group, on/off switch.
 
 import { h } from './dom.js';
 
@@ -33,5 +33,19 @@ export function chipGroup(items, value, onChange, label) {
     if (fire) onChange(v);
   }
   el.set = (v) => set(v, false);
+  return el;
+}
+
+/**
+ * On/off switch (a button with role=switch). `opts.labelledby` = id of its visible label.
+ * onChange(newValue) runs after the switch flipped.
+ */
+export function toggleSwitch(value, onChange, opts = {}) {
+  let on = !!value;
+  const el = h('button', {
+    type: 'button', role: 'switch', class: 'switch', 'aria-checked': on ? 'true' : 'false',
+    'aria-labelledby': opts.labelledby || null, 'aria-label': opts.labelledby ? null : (opts.label || null),
+    onclick: () => { on = !on; el.setAttribute('aria-checked', on ? 'true' : 'false'); onChange(on); },
+  });
   return el;
 }

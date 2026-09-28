@@ -241,6 +241,20 @@ function countFor(month, kinds) {
   return known ? n : Number(month.msg) || 0;
 }
 
+/**
+ * 'YYYY-MM' months around `ym`, nearest first: ym, ym-1, ym+1, ym-2, … (earlier before
+ * later at the same distance), at most `span` months away. [] for a malformed ym.
+ */
+export function monthsAround(ym, span = 0) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(ym || ''));
+  if (!m) return [];
+  const base = Number(m[1]) * 12 + Number(m[2]) - 1;
+  const fmt = (n) => `${String(Math.floor(n / 12)).padStart(4, '0')}-${pad2((n % 12) + 1)}`;
+  const out = [fmt(base)];
+  for (let d = 1; d <= Math.max(0, Math.floor(Number(span) || 0)); d++) out.push(fmt(base - d), fmt(base + d));
+  return out;
+}
+
 function expandMediaKinds(kinds) {
   const set = new Set(kinds && kinds.length ? kinds : ['photo', 'video']);
   if (set.has('photo')) set.add('gif');
@@ -832,6 +846,58 @@ export class Archive extends EventTarget {
     const ch = await this.chunk(roomId, month, { signal });
     const hit = ch.media.find((r) => r.id === row.id && r.k === row.k) || ch.media.find((r) => r.id === row.id);
     return hit ? { ...hit, room: roomId, ym: month } : null;
+  }
+
+  /**
+   * Find a media row by media id (or the first row a predicate accepts) near month `ym` —
+   * e.g. the better copy of a low-quality duplicate (chunk field `lq`), whose room and month
+   * the row does not say. Looks at
+   * `rooms` (ids in priority order; default every room, most recently active first) in the
+   * months ym, ym-1, ym+1, ym-2, … at most `span` months away (only month entries with
+   * photos/videos). Chunks already in memory are checked first (free); then at most
+   * `maxLoads` other chunks are fetched, 4 at a time, nearest months first — callers pick a
+   * budget that stays cheap on a slow Drive connection.
+   * @param {string|function(object): boolean} match media id, or a predicate on media rows
+   * @param {{ym: string, rooms?: string[]|null, span?: number, maxLoads?: number, signal?: AbortSignal}} opts
+   * @returns {Promise<object|null>} {...row, room, ym} or null
+   */
+  async findMediaRow(match, { ym, rooms = null, span = 1, maxLoads = 16, signal } = {}) {
+    await this._ensureLoaded(signal);
+    if (!match || !ym) return null;
+    const pred = typeof match === 'function' ? match : (r) => r.id === match;
+    const order = rooms ? rooms.filter((id) => this._roomById.has(id)) : this._rooms.map((r) => r.id);
+    const cands = [];
+    for (const month of monthsAround(ym, span)) {
+      for (const roomId of order) {
+        const e = this.monthEntry(roomId, month);
+        if (!e) continue;
+        if (COUNT_KEYS.some((k) => k in e) && !((Number(e.photo) || 0) + (Number(e.video) || 0))) continue;
+        cands.push([roomId, month, e.chunk]);
+      }
+    }
+    const look = (chunk, roomId, month) => {
+      const hit = chunk && chunk.media.find(pred);
+      return hit ? { ...hit, room: roomId, ym: month } : null;
+    };
+    const rest = [];
+    for (const [roomId, month, rel] of cands) {
+      const c = this._chunks.get(rel);
+      if (!c) { rest.push([roomId, month]); continue; }
+      const hit = look(c, roomId, month);
+      if (hit) return hit;
+    }
+    const todo = rest.slice(0, Math.max(0, maxLoads | 0));
+    for (let i = 0; i < todo.length; i += 4) {
+      throwIfAborted(signal);
+      const batch = todo.slice(i, i + 4);
+      const chunks = await Promise.all(batch.map(([roomId, month]) => this.chunk(roomId, month, { signal })
+        .catch((e) => { if (isAbortError(e)) throw e; return null; })));
+      for (let j = 0; j < batch.length; j++) {
+        const hit = look(chunks[j], batch[j][0], batch[j][1]);
+        if (hit) return hit;
+      }
+    }
+    return null;
   }
 
   /**

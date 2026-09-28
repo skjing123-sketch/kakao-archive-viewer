@@ -1,9 +1,11 @@
-// more.js — 더보기 (#/more): 마지막 백업(+리포트), 저장소 정보, 화면 테마, 캐시 비우기,
-// 데이터 소스 변경(설정 초기화), 앱 버전, 온라인 상태.
+// more.js — 더보기 (#/more): 마지막 백업(+리포트), 저장소 정보, 화면 테마, 사진 목록
+// (저화질 중복 사진 보기), 캐시 비우기, 데이터 소스 변경(설정 초기화), 앱 버전, 온라인 상태.
 
 import { h, icon, clear, toast, confirmDialog, openSheet, spinner, prefs } from './dom.js';
 import { num, bytes, koDateTime, dotDate, originalsLabel, targetTypeLabel, daysAgo, relativeDay } from './format.js';
-import { segmented } from './widgets.js';
+import { segmented, toggleSwitch } from './widgets.js';
+import { SHOW_LQ_PREF } from './model.js';
+import { hiddenLowQualityCount } from './gallery.js';
 
 export const APP_VERSION = '0.1.0';
 
@@ -94,6 +96,20 @@ export function createMore(ctx) {
     body.appendChild(card('화면', 'sun',
       h('div', { class: 'kv' }, h('span', { class: 'kv-k', text: '테마' }),
         segmented([['system', '시스템'], ['light', '라이트'], ['dark', '다크']], theme, (v) => { prefs.set('theme', v); ctx.applyTheme(); }, '테마'))));
+
+    // 사진 목록: 저화질 중복 (chunk fields lq/lqs; gallery.js hides them unless this is on) --
+    const showLq = !!prefs.get(SHOW_LQ_PREF, false);
+    const hidden = showLq ? 0 : hiddenLowQualityCount();
+    body.appendChild(card('사진 목록', 'photo',
+      h('div', { class: 'kv' }, h('span', { class: 'kv-k', id: 'lq-pref-label', text: '저화질 중복 사진 보기' }),
+        toggleSwitch(showLq, (v) => {
+          prefs.set(SHOW_LQ_PREF, v);
+          ctx.emit('lq-pref', v);
+          toast(v ? '저화질 중복 사진도 사진 목록에 보여요.' : '저화질 중복 사진을 사진 목록에서 숨겨요.', { duration: 1800 });
+          render();
+        }, { labelledby: 'lq-pref-label' })),
+      h('p', { class: 'note', text: '같은 사진의 원본이나 더 좋은 화질이 보관함에 있으면, 썸네일만 남은 사진이나 작게 다시 보낸 복사본은 사진 목록에서 숨겨요. 대화에서는 그대로 보이고, 누르면 더 좋은 화질로 열려요. 중요 표시한 사진은 항상 보여요.' }),
+      hidden > 0 ? h('p', { class: 'note', text: `지금까지 불러온 달에서 저화질 중복 ${num(hidden)}개를 숨겼어요.` }) : null));
 
     // 저장공간 ----------------------------------------------------------------
     const storage = h('p', { class: 'muted', text: '사용량 확인 중…' });

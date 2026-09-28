@@ -18,17 +18,38 @@
 // newest reference among the LOADED months is in it; when a newer month loads later and
 // references the same file, the older month drops that tile. Room-scoped views keep every
 // reference. Month header counts are the tiles actually shown once a month is loaded;
-// before that the catalog count is shown only where it is exact (no de-duplication).
+// before that the catalog count is shown only where it is exact (no de-duplication, no
+// hidden duplicates).
+//
+// Low-quality duplicates (chunk fields lq/lqs, model.isHiddenLowQuality): unless the
+// '저화질 중복 사진 보기' preference (더보기) is on, the home timeline over every room hides
+// rows of which a better copy exists anywhere (lq), room-scoped views those with a better
+// copy in the same room (lqs); starred rows always stay. Hidden rows are left out before
+// the L9 de-duplication, so swiping in the media viewer skips them too.
 
-import { h, icon, clear, scrollToEl, topInset } from './dom.js';
+import { h, icon, clear, scrollToEl, topInset, prefs } from './dom.js';
 import { koDateFromYmd, koMonth, ymdOf, duration, num } from './format.js';
-import { GALLERY_FILTERS, starKey, dedupeNewest, keepShown, tileLabel, isVideoThumb } from './model.js';
+import {
+  GALLERY_FILTERS, starKey, dedupeNewest, keepShown, tileLabel, isVideoThumb, hideLowQuality, isLowQualityDup, SHOW_LQ_PREF,
+} from './model.js';
 import { shareMany } from './files.js';
 
 const GAP = 2;
 const DAY_HEAD = 44;
 const MONTH_HEAD = 52;
 const selKey = (r) => `${r.room}|${r.k}|${r.id}`;
+/** Galleries alive (home, open room screens): 더보기 reports how many rows they hide. */
+const LIVE = new Set();
+
+/**
+ * Low-quality duplicates hidden in the months the live galleries have loaded (each
+ * reference once, across screens) — for the 더보기 explanation.
+ */
+export function hiddenLowQualityCount() {
+  const keys = new Set();
+  for (const g of LIVE) for (const s of g.sections) for (const r of s.hidden || []) keys.add(selKey(r));
+  return keys.size;
+}
 
 export class Gallery {
   /**
@@ -46,6 +67,7 @@ export class Gallery {
     this.emptyText = opts.emptyText || '';
     this.dedupeAcrossRooms = !!opts.dedupeAcrossRooms;
     this._shown = new Map();              // media id → shown reference (dedupe mode)
+    this.showLq = !!prefs.get(SHOW_LQ_PREF, false);
     this.el = h('div', { class: 'gallery' });
     this.sections = [];
     this.byYm = new Map();
@@ -72,7 +94,10 @@ export class Gallery {
     });
     this._starHandler = () => this._refreshStars();
     ctx.on('star', this._starHandler);
+    this._lqHandler = (on) => this.setShowLowQuality(on);
+    ctx.on('lq-pref', this._lqHandler);
     window.addEventListener('resize', this._onResize);
+    LIVE.add(this);
     this.build();
   }
 
@@ -80,6 +105,32 @@ export class Gallery {
 
   /** One tile per media id (home timeline over several rooms)? Room-scoped: every reference. */
   get dedupe() { return this.dedupeAcrossRooms && !(this.roomIds && this.roomIds.length === 1); }
+
+  /**
+   * Which low-quality duplicates this view hides (model.isHiddenLowQuality): 'all' for the
+   * timeline over every room (a better copy anywhere), 'rooms' when scoped to chosen rooms
+   * (only a better copy in the same room — one in a room not shown must not hide it).
+   */
+  get lqScope() { return this.roomIds && this.roomIds.length ? 'rooms' : 'all'; }
+
+  /** Rows of a month as shown: kind filter, low-quality duplicates hidden (not deduped yet). */
+  _visible(rows, ym) {
+    const kinds = this.rowKinds;
+    const list = (rows || []).filter((r) => kinds.includes(r.y)).map((r) => (r.ym ? r : Object.assign({}, r, { ym })));
+    const a = this.ctx.archive;
+    return hideLowQuality(list, {
+      scope: this.lqScope, show: this.showLq,
+      isStarred: (r) => a.isStarred(starKey(r.room, r.k, r.id)),
+    });
+  }
+
+  /** '저화질 중복 사진 보기' changed (더보기): rebuild with the new rule. */
+  setShowLowQuality(on) {
+    const v = !!on;
+    if (v === this.showLq) return;
+    this.showLq = v;
+    this.build();
+  }
 
   /** Rebuild all sections (after a filter/mode change or catalog reload). */
   build() {
@@ -149,6 +200,8 @@ export class Gallery {
     this._farIO.disconnect();
     window.removeEventListener('resize', this._onResize);
     this.ctx.off('star', this._starHandler);
+    this.ctx.off('lq-pref', this._lqHandler);
+    LIVE.delete(this);
   }
 
   // -------------------------------------------------------------------------
@@ -191,10 +244,13 @@ export class Gallery {
     return Math.round(hgt);
   }
 
-  /** Tiles of a month: exact once loaded; before that the catalog count where it is exact. */
+  /**
+   * Tiles of a month: exact once loaded; before that the catalog count where it is exact
+   * (not when tiles may be de-duplicated or hidden as low-quality duplicates).
+   */
   shownCount(sec) {
     if (sec.rows) return sec.rows.length;
-    return this.dedupe ? null : sec.count;
+    return this.dedupe || !this.showLq ? null : sec.count;
   }
 
   _monthHead(sec) {
@@ -225,9 +281,12 @@ export class Gallery {
     const frag = document.createDocumentFragment();
     frag.appendChild(this._monthHead(sec));
     if (!rows.length) {
-      frag.appendChild(h('p', { class: 'g-none', text: sec.deduped
-        ? '이 달의 사진·동영상은 모두 나중에 다시 공유되어 더 최근 날짜에 표시돼요.'
-        : '이 달에는 표시할 항목이 없어요.' }));
+      const hid = !!(sec.hidden && sec.hidden.length);
+      frag.appendChild(h('p', { class: 'g-none', text: hid && sec.deduped
+        ? '이 달의 사진·동영상은 모두 더 최근 날짜나 더 좋은 화질의 같은 사진으로 표시돼요.'
+        : hid ? '이 달의 사진은 모두 더 좋은 화질의 같은 사진이 따로 있어 숨겼어요. (더보기 › 저화질 중복 사진 보기)'
+          : sec.deduped ? '이 달의 사진·동영상은 모두 나중에 다시 공유되어 더 최근 날짜에 표시돼요.'
+            : '이 달에는 표시할 항목이 없어요.' }));
     } else if (this.mode === 'day') {
       let cur = null, grid = null, count = 0, headCount = null;
       for (let i = 0; i < rows.length; i++) {
@@ -277,6 +336,7 @@ export class Gallery {
     else if (r.y === 'video') t.appendChild(h('span', { class: 'badge badge-video' }, icon('play', 12), r.d ? duration(r.d) : ''));
     else if (r.y === 'gif') t.appendChild(h('span', { class: 'badge badge-gif', text: 'GIF' }));
     if (r.to) t.appendChild(h('span', { class: 'badge badge-low', title: '썸네일만 보관됨' }, icon('lowres', 12), '저화질'));
+    else if (isLowQualityDup(r)) t.appendChild(h('span', { class: 'badge badge-low', title: '더 좋은 화질의 같은 사진이 있어요' }, icon('lowres', 12), '저화질'));
     if (this.ctx.archive.isStarred(starKey(r.room, r.k, r.id))) t.appendChild(h('span', { class: 'badge badge-star' }, icon('starFill', 14)));
     if (!r.th) t.classList.add('nothumb');
     return t;
@@ -356,7 +416,9 @@ export class Gallery {
         const kinds = this.rowKinds;
         const rows = await this.ctx.archive.mediaInMonth(sec.ym, { roomIds: this.roomIds, kinds });
         if (gen !== this._gen) return;
-        let list = (rows || []).filter((r) => kinds.includes(r.y)).map((r) => (r.ym ? r : Object.assign({}, r, { ym: sec.ym })));
+        const vis = this._visible(rows, sec.ym);
+        let list = vis.rows;
+        sec.hidden = vis.hidden;
         let stolen = null;
         if (this.dedupe) {
           const before = list.length;
@@ -599,8 +661,7 @@ export class Gallery {
     const sec = this.byYm.get(ym);
     let rows = sec && sec.rows;
     if (!rows) {
-      const kinds = this.rowKinds;
-      rows = (await this.ctx.archive.mediaInMonth(ym, { roomIds: this.roomIds, kinds }) || []).filter((r) => kinds.includes(r.y));
+      rows = this._visible(await this.ctx.archive.mediaInMonth(ym, { roomIds: this.roomIds, kinds: this.rowKinds }), ym).rows;
       if (this.dedupe) rows = dedupeNewest(rows, new Map([...this._shown].filter(([, v]) => v.key !== ym)), ym).rows;
     }
     const out = new Map();

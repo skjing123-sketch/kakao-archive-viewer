@@ -5,10 +5,22 @@
 // swipe down to close, info sheet, ★ 중요, 공유/저장, 대화에서 보기. A video whose original
 // was never downloaded (y:'video', to:true, a JPEG file — model.isVideoThumb) is shown as a
 // picture with a '동영상 · 썸네일만 보관됨' badge, never in a <video>.
+//
+// Low-quality duplicates (chunk fields lq/lqs, model.betterCopyId): a list from a chat
+// (provider.upgrade) shows the better copy in place of the message's own picture by itself
+// only when that picture is a thumbnail-only copy (to), the better copy is in the SAME room
+// (lqs) and '저화질 중복 사진 보기' is off — found in the viewer's lists or the room's nearby
+// months. Everything else (a full-size copy, a better copy in another room, galleries, 중요)
+// shows the row as it is with '더 좋은 화질이 … 있어요' and a button ('보기' / '찾아보기') that
+// looks for it (wider). ★ 중요, 공유·저장 and 대화에서 보기 always act on the message's own
+// picture unless the user asked for the better copy (review F4); the info sheet explains
+// either state and can switch back to the message's own picture.
 
-import { h, icon, iconButton, clear, openSheet, toast, prefersReducedMotion } from './dom.js';
+import { h, icon, iconButton, clear, openSheet, toast, prefersReducedMotion, prefs } from './dom.js';
 import { koDateTime, koDate, koTime, bytes, duration, mediaKindLabel } from './format.js';
-import { starKey, hasFullMedia, isVideoThumb } from './model.js';
+import {
+  starKey, hasFullMedia, isVideoThumb, betterCopyId, isLowQualityDup, isHiddenLowQuality, SHOW_LQ_PREF,
+} from './model.js';
 import { pathOf, decodeViewParam, encodeViewParam } from './router.js';
 import { shareOrSave } from './files.js';
 import { stopAudio } from './audio.js';
@@ -19,6 +31,25 @@ const rowKey = (r) => `${r.room}|${r.k}|${r.id}`;
 /** A real (playable) video — not the thumbnail of one that was never downloaded. */
 const isPlayable = (r) => !!r && r.y === 'video' && !isVideoThumb(r);
 const VIDEO_THUMB_TEXT = '동영상의 썸네일만 보관되었어요 — 원본 동영상은 휴대폰에서 받지 않아 보관되지 않았어요.';
+/** Is `a` a strictly better copy than `b`? original > thumbnail-only, then pixels; at the same
+ *  pixel count only a clearly smaller file (≥ 1.3 × fewer bytes) is worse (archive dupes.better). */
+function qualityAbove(a, b) {
+  const q = (r) => [r.to ? 0 : 1, (Number(r.w) || 0) * (Number(r.h) || 0), Number(r.sz) || 0];
+  const x = q(a);
+  const y = q(b);
+  if (x[0] !== y[0]) return x[0] > y[0];
+  if (x[1] !== y[1]) return x[1] > y[1];
+  return y[2] > 0 && x[2] >= y[2] * 1.3;
+}
+
+/** '사진' or '동영상' — what a row shows (a thumbnail-only video is still a 동영상). */
+const noun = (r) => (r && r.y === 'video' ? '동영상' : '사진');
+// Lookup budgets for a better copy (chunks fetched at most; chunks in memory are free).
+// Automatic (chat): the room's months nearby only.
+// 더 좋은 화질 보기 / 찾아보기 (asked for): wider, other rooms too, with a '찾는 중' toast.
+const AUTO_ROOM = { span: 6, maxLoads: 8 };
+const WIDE_ROOM = { span: 36, maxLoads: 48 };
+const WIDE_OTHERS = { span: 24, maxLoads: 160 };
 
 export class MediaViewer {
   constructor(ctx) {
@@ -28,6 +59,12 @@ export class MediaViewer {
     this.list = [];
     this.index = -1;
     this.chrome = true;
+    this._subst = new Map();       // rowKey(low-quality row) → better copy shown in its place ({...row, _low, _asked})
+    this._reverted = new Set();    // rowKeys of low-quality rows to show as they are (info sheet)
+    this._betterMiss = new Set();  // rowKeys whose automatic lookup found nothing
+    this._better = new Map();      // `${rowKey}|a|w` → {p: Promise<better row|null>, signal, done} (per catalog)
+    this._session = 0;             // bumped per list: late lookups never touch a newer list
+    this._lookups = new AbortController();   // aborted when the viewer closes or gets a new list
     this.el = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '사진 보기', hidden: true });
     this.backdrop = h('div', { class: 'vw-backdrop' });
     this.track = h('div', { class: 'vw-track' });
@@ -50,6 +87,28 @@ export class MediaViewer {
     this._onKey = (ev) => this._key(ev);
     this._onResize = () => { if (this.isOpen) { for (const s of this.slides) this._layout(s); this._position(0, false); } };
     ctx.on('star', () => this._updateStar());
+    ctx.on('catalog', () => { this._better.clear(); this._betterMiss.clear(); });
+  }
+
+  /** A new list (or none): forget its swaps and stop the lookups made for the old one. */
+  _newSession() {
+    this._subst.clear();
+    this._reverted.clear();
+    this._session++;
+    this._lookups.abort();
+    this._lookups = new AbortController();
+  }
+
+  /** The provider's rows with the better copies swapped in (see _substitute). */
+  _providerList() {
+    const list = this.provider ? this.provider.list() : [];
+    return this._subst.size ? list.map((r) => this._subst.get(rowKey(r)) || r) : list;
+  }
+
+  /** Keep `r` in a fallback list (the same hiding rule as a room gallery)? */
+  _keepInList(r, ref) {
+    if (r.id === ref.id || prefs.get(SHOW_LQ_PREF, false)) return true;
+    return !isHiddenLowQuality(r, 'rooms', this.ctx.archive.isStarred(starKey(r.room, r.k, r.id)));
   }
 
   // -------------------------------------------------------------------------
@@ -60,15 +119,20 @@ export class MediaViewer {
   async showParam(param, provider) {
     const ref = decodeViewParam(param);
     if (!ref) return false;
-    if (provider) this.provider = provider;
-    let list = this.provider ? this.provider.list() : [];
+    if (provider) {
+      this.provider = provider;
+      this._newSession();
+    }
+    let list = this._providerList();
     let idx = this._find(list, ref);
     if (idx < 0) {
       // Deep link / reload: list = that month of that room.
       try {
         const rows = await this.ctx.archive.mediaInMonth(ref.ym, { roomIds: [ref.room], kinds: ['photo', 'gif', 'video'] });
-        list = (rows || []).filter((r) => r.y === 'photo' || r.y === 'gif' || r.y === 'video').map((r) => Object.assign({}, r, { room: r.room || ref.room, ym: r.ym || ref.ym }));
-        this.provider = this._monthProvider(ref.room, list);
+        list = (rows || []).filter((r) => r.y === 'photo' || r.y === 'gif' || r.y === 'video').map((r) => Object.assign({}, r, { room: r.room || ref.room, ym: r.ym || ref.ym }))
+          .filter((r) => this._keepInList(r, ref));
+        this.provider = this._monthProvider(ref.room, list, ref);
+        this._newSession();
         idx = this._find(list, ref);
       } catch (err) {
         this.ctx.handleError(err, { quiet: true });
@@ -88,13 +152,17 @@ export class MediaViewer {
   }
 
   _find(list, ref) {
+    // the row on screen first: a list may hold one picture twice (a better copy shown in
+    // place of a message's low-quality one next to the message that holds the copy)
+    const cur = this.index >= 0 ? list[this.index] : null;
+    if (cur && cur.id === ref.id && cur.room === ref.room && (!ref.k || cur.k === ref.k)) return this.index;
     let i = list.findIndex((r) => r.id === ref.id && r.room === ref.room && (!ref.k || r.k === ref.k));
     if (i < 0) i = list.findIndex((r) => r.id === ref.id && r.room === ref.room);
     return i;
   }
 
   /** Fallback provider: one month of one room, extendable to neighbouring months. */
-  _monthProvider(roomId, rows) {
+  _monthProvider(roomId, rows, ref = {}) {
     const room = this.ctx.archive.room(roomId);
     const yms = room ? (room.months || []).filter((m) => (m.photo || 0) + (m.video || 0) > 0).map((m) => m.ym) : [];   // desc
     let list = rows.slice();
@@ -108,7 +176,8 @@ export class MediaViewer {
         if (!next || loaded.has(next)) return false;
         loaded.add(next);
         const more = ((await this.ctx.archive.mediaInMonth(next, { roomIds: [roomId], kinds: ['photo', 'gif', 'video'] })) || [])
-          .filter((r) => r.y === 'photo' || r.y === 'gif' || r.y === 'video').map((r) => Object.assign({}, r, { room: r.room || roomId, ym: r.ym || next }));
+          .filter((r) => r.y === 'photo' || r.y === 'gif' || r.y === 'video').map((r) => Object.assign({}, r, { room: r.room || roomId, ym: r.ym || next }))
+          .filter((r) => this._keepInList(r, ref));
         list = dir > 0 ? list.concat(more) : more.concat(list);
         return more.length > 0;
       },
@@ -136,6 +205,7 @@ export class MediaViewer {
     document.removeEventListener('keydown', this._onKey);
     window.removeEventListener('resize', this._onResize);
     for (const s of this.slides) this._unloadSlide(s);
+    this._newSession();
     this.el.classList.remove('open');
     this.el.classList.add('closing');
     document.documentElement.classList.remove('viewer-open');
@@ -163,7 +233,7 @@ export class MediaViewer {
     const stage = h('div', { class: 'vw-stage' }, thumb, full);
     const msg = h('div', { class: 'vw-msg', hidden: true });
     const el = h('div', { class: 'vw-slide' }, stage, msg);
-    return { el, stage, thumb, full, msg, row: null, video: null, z: { s: 1, tx: 0, ty: 0 }, box: null, gen: 0 };
+    return { el, stage, thumb, full, msg, row: null, video: null, z: { s: 1, tx: 0, ty: 0 }, box: null, gen: 0, lqNote: null };
   }
 
   _unloadSlide(s) {
@@ -188,6 +258,7 @@ export class MediaViewer {
     this._unloadSlide(s);
     s.row = row;
     s.gen++;
+    s.lqNote = null;
     s.z = { s: 1, tx: 0, ty: 0 };
     s.el.classList.remove('loaded', 'is-video', 'is-video-thumb', 'failed');
     s.msg.hidden = true;
@@ -203,14 +274,184 @@ export class MediaViewer {
       s.el.classList.add('is-video');
       if (current) this._activate(s);
       else s.stage.appendChild(h('span', { class: 'vw-play', 'aria-hidden': 'true' }, icon('play', 34)));
+    } else {
+      if (isVideoThumb(row)) {
+        // only the JPEG thumbnail exists: a picture (zoomable), no play button, no <video>
+        s.el.classList.add('is-video-thumb');
+        this._message(s, VIDEO_THUMB_TEXT, 'info');
+      }
+      this._loadFull(s, current);
+    }
+    this._lowQuality(s);
+  }
+
+  // -------------------------------------------------------------------------
+  // Low-quality duplicates: find and show the better copy
+  // -------------------------------------------------------------------------
+
+  /**
+   * Does this list swap a message's picture for its better copy by itself? Only a chat list,
+   * only for a thumbnail-only picture whose better copy is in the same room, and never when
+   * the user chose to see low-quality duplicates ('저화질 중복 사진 보기', review F4).
+   */
+  _autoUpgrade(row) {
+    const key = rowKey(row);
+    return !!(this.provider && this.provider.upgrade) && !this._reverted.has(key) && !this._betterMiss.has(key)
+      && betterCopyId(row) !== null && row.to === true && row.lqs === true && !prefs.get(SHOW_LQ_PREF, false);
+  }
+
+  /** The row ★ 중요, 공유·저장 and 대화에서 보기 act on: the message's own one, unless the user
+   *  asked for the better copy shown in its place. */
+  _actionRow() {
+    const row = this.list[this.index];
+    return row && row._low && !row._asked ? row._low : row;
+  }
+
+  /** A slide shows a low-quality duplicate: look for the better copy (chat) or offer it. */
+  _lowQuality(s) {
+    const row = s.row;
+    if (!row || row._low || !isLowQualityDup(row)) return;
+    if (this._autoUpgrade(row)) {
+      s.lqNote = 'searching';
+      this._lqMessage(s);
+      const gen = s.gen;
+      const session = this._session;
+      this._findBetter(row, false).then((better) => {
+        if (session !== this._session) return;
+        if (better) { this._substitute(row, better); return; }
+        this._betterMiss.add(rowKey(row));
+        if (s.gen === gen) { s.lqNote = 'offer'; this._lqMessage(s); }
+      });
       return;
     }
-    if (isVideoThumb(row)) {
-      // only the JPEG thumbnail exists: a picture (zoomable), no play button, no <video>
-      s.el.classList.add('is-video-thumb');
-      this._message(s, VIDEO_THUMB_TEXT, 'info');
+    s.lqNote = 'offer';
+    this._lqMessage(s);
+  }
+
+  _lqMessage(s) {
+    const row = s.row;
+    clear(s.msg);
+    if (s.lqNote === 'searching') {
+      s.msg.append(icon('sparkle', 16), h('span', { text: `더 좋은 화질의 같은 ${noun(row)}을 찾는 중…` }));
+    } else {
+      const same = row.lqs === true;
+      s.msg.append(icon('sparkle', 16), h('span', { text: same ? `같은 ${noun(row)}의 더 좋은 화질이 이 대화방에 있어요.` : '더 좋은 화질이 다른 대화방에 있어요.' }));
+      if (betterCopyId(row)) {
+        s.msg.appendChild(h('button', { type: 'button', class: 'vw-msg-btn', onclick: () => this.openBetter(row) }, same ? '보기' : '찾아보기'));
+      }
     }
-    this._loadFull(s, current);
+    s.msg.className = 'vw-msg vw-msg-info vw-msg-lq';
+    s.msg.hidden = false;
+  }
+
+  /**
+   * The row of a better copy of `low`, or null. `lq` names the BEST copy (anywhere); with
+   * `lqs` a strictly better copy is in the same room — the best one, or another copy of the
+   * same picture (it carries the same `lq`) of higher quality. Automatic (chat): rows of the
+   * same room at hand (this list, the screen's list), then the room's months nearby — never
+   * another room. Asked for (`wide`): the best copy first, in the room and then in other rooms
+   * within the wider budget, else a better copy of the room.
+   * A copy that this storage cannot show (no original, no preview) never replaces one it can.
+   */
+  _findBetter(low, wide) {
+    const id = betterCopyId(low);
+    if (!id) return Promise.resolve(null);
+    const key = `${rowKey(low)}|${wide ? 'w' : 'a'}`;
+    const memo = this._better.get(key);
+    if (memo && (memo.done || !memo.signal.aborted)) return memo.p;   // not one stopped with an old list
+    const signal = this._lookups.signal;
+    const entry = { signal, done: false, p: null };
+    entry.p = this._lookupBetter(low, id, wide, signal).then((row) => { entry.done = true; return row; }, (err) => {
+      if (!err || err.name !== 'AbortError') console.warn('[viewer] better copy lookup failed', err);
+      if (this._better.get(key) === entry) this._better.delete(key);
+      return null;
+    });
+    this._better.set(key, entry);
+    return entry.p;
+  }
+
+  async _lookupBetter(low, id, wide, signal) {
+    const a = this.ctx.archive;
+    const usable = (r) => !!r && (hasFullMedia(r) || !hasFullMedia(low));
+    const best = (r) => r.id === id;
+    // another copy of the same picture in this room, strictly better than `low` (lqs)
+    const sibling = (r) => low.lqs === true && r.lq === id && r.id !== low.id && qualityAbove(r, low);
+    const inRoom = (r) => best(r) || sibling(r);
+    const atHand = [this.list, this.provider ? this.provider.list() : []];
+    const fromLists = (pred, sameRoom) => {
+      for (const l of atHand) {
+        const hit = l.find((r) => !r._low && r.room === low.room && pred(r))
+          || (sameRoom ? null : l.find((r) => !r._low && best(r) && pred(r)));
+        if (usable(hit)) return hit;
+      }
+      return null;
+    };
+    let hit = wide ? fromLists(best, false) : (fromLists(best, true) || fromLists(inRoom, true));
+    if (hit || typeof a.findMediaRow !== 'function') return hit || null;
+    if (!wide) {
+      hit = await a.findMediaRow(inRoom, { ym: low.ym, rooms: [low.room], signal, ...AUTO_ROOM });
+      return usable(hit) ? hit : null;
+    }
+    const others = a.rooms().map((r) => r.id).filter((x) => x !== low.room);
+    hit = await a.findMediaRow(best, { ym: low.ym, rooms: [low.room], signal, ...WIDE_ROOM });
+    if (usable(hit)) return hit;
+    hit = await a.findMediaRow(best, { ym: low.ym, rooms: others, signal, ...WIDE_OTHERS });
+    if (usable(hit)) return hit;
+    hit = fromLists(inRoom, false) || (low.lqs === true ? await a.findMediaRow(sibling, { ym: low.ym, rooms: [low.room], signal, ...WIDE_ROOM }) : null);
+    return usable(hit) ? hit : null;
+  }
+
+  /** Show `better` in place of the low-quality row `low` (every place of it in this list);
+   *  `asked`: the user asked for it (the actions then act on the better copy). */
+  _substitute(low, better, asked = false) {
+    const key = rowKey(low);
+    if (!this.isOpen || this._reverted.has(key)) return;
+    const shown = Object.assign({}, better, { _low: low, _asked: asked });
+    this._subst.set(key, shown);
+    let touched = false;
+    this.list = this.list.map((r) => {
+      if (!r._low && rowKey(r) === key) { touched = true; return shown; }
+      return r;
+    });
+    if (!touched || this._animating) return;
+    this._renderAll();
+    const cur = this.list[this.index];
+    if (cur === shown) this.ctx.router.setQuery({ view: encodeViewParam(cur) }, { replace: true });
+  }
+
+  /** Back to the message's own low-quality picture (info sheet). */
+  _revert(shown) {
+    const low = shown && shown._low;
+    if (!low) return;
+    const key = rowKey(low);
+    this._reverted.add(key);
+    this._subst.delete(key);
+    this.list = this.list.map((r) => (r._low && rowKey(r._low) === key ? low : r));
+    this._renderAll();
+    const cur = this.list[this.index];
+    if (cur) this.ctx.router.setQuery({ view: encodeViewParam(cur) }, { replace: true });
+  }
+
+  /** 더 좋은 화질 보기 / 찾아보기: the wider lookup, then show the copy in place. */
+  async openBetter(row) {
+    if (!row || row._low || !betterCopyId(row)) return;
+    this._reverted.delete(rowKey(row));
+    let close = null;
+    const session = this._session;
+    const timer = setTimeout(() => { close = toast(`더 좋은 화질의 같은 ${noun(row)}을 찾는 중…`, { duration: 30000 }); }, 350);
+    let better = null;
+    try {
+      better = await this._findBetter(row, true);
+    } finally {
+      clearTimeout(timer);
+      if (close) close();
+    }
+    if (!this.isOpen || session !== this._session) return;
+    if (!better) {
+      toast(`더 좋은 화질의 ${noun(row)}을 찾지 못했어요. 오래전 다른 대화에 있을 수 있어요.`);
+      return;
+    }
+    this._substitute(row, better, true);
   }
 
   _layout(s) {
@@ -267,6 +508,7 @@ export class MediaViewer {
   }
 
   _message(s, text, kind) {
+    if (s.lqNote && kind !== 'error') return;     // the better-copy note says more
     clear(s.msg).append(icon(kind === 'error' ? 'alert' : 'info', 16), h('span', { text }));
     s.msg.className = 'vw-msg vw-msg-' + kind;
     s.msg.hidden = false;
@@ -319,13 +561,18 @@ export class MediaViewer {
     this.title.querySelector('.vw-when').textContent = `${koDate(row.t)} ${koTime(row.t)}`;
     this.el.setAttribute('aria-label', `${mediaKindLabel(row.y)}${isVideoThumb(row) ? ' 썸네일' : ''} 보기, ${row.n || ''}, ${koDateTime(row.t)}`);
     clear(this.badges);
-    if (isVideoThumb(row)) this.badges.appendChild(h('span', { class: 'vw-badge vw-badge-vthumb' }, icon('video', 14), '동영상 · 썸네일만 보관됨'));
+    if (row._low) {
+      this.badges.appendChild(h('span', { class: 'vw-badge vw-badge-hq' }, icon('sparkle', 14),
+        row.room !== row._low.room ? '다른 대화방의 더 좋은 화질로 보는 중' : '더 좋은 화질로 보는 중'));
+    } else if (isVideoThumb(row)) this.badges.appendChild(h('span', { class: 'vw-badge vw-badge-vthumb' }, icon('video', 14), '동영상 · 썸네일만 보관됨'));
     else if (row.to) this.badges.appendChild(h('span', { class: 'vw-badge' }, icon('lowres', 14), '저화질 · 썸네일만 보관됨'));
+    else if (isLowQualityDup(row)) this.badges.appendChild(h('span', { class: 'vw-badge' }, icon('lowres', 14), '저화질 복사본'));
     else if (row.pv && row.orig === false) this.badges.appendChild(h('span', { class: 'vw-badge' }, icon('info', 14), '미리보기 · 원본은 NAS에 보관됨'));
     this.prevBtn.hidden = this.index <= 0 && !this.provider;
     this.nextBtn.hidden = this.index >= this.list.length - 1 && !this.provider;
-    this.chatBtn.disabled = !row.k;
-    this.shareBtn.disabled = !hasFullMedia(row);
+    const own = this._actionRow();
+    this.chatBtn.disabled = !own.k;
+    this.shareBtn.disabled = !hasFullMedia(own);
     this._updateStar();
     // Prefetch more rows when close to either end.
     if (this.provider && this.provider.extend) {
@@ -341,8 +588,9 @@ export class MediaViewer {
       const cur = this.list[this.index];
       const more = await this.provider.extend(cur, dir);
       if (!more || !this.isOpen) return;
-      const list = this.provider.list();
-      const idx = list.findIndex((r) => rowKey(r) === rowKey(cur));
+      const list = this._providerList();
+      let idx = list.indexOf(cur);
+      if (idx < 0) idx = list.findIndex((r) => rowKey(r) === rowKey(cur));
       if (idx < 0) return;
       this.list = list;
       this.index = idx;
@@ -356,7 +604,7 @@ export class MediaViewer {
   }
 
   _updateStar() {
-    const row = this.list[this.index];
+    const row = this._actionRow();
     if (!row) return;
     const on = this.ctx.archive.isStarred(starKey(row.room, row.k, row.id));
     this.starBtn.classList.toggle('on', on);
@@ -599,18 +847,18 @@ export class MediaViewer {
   // -------------------------------------------------------------------------
 
   async toggleStar() {
-    const row = this.list[this.index];
+    const row = this._actionRow();
     if (!row) return;
     await this.ctx.toggleStar(starKey(row.room, row.k, row.id), { room: row.room, ym: row.ym, k: row.k, id: row.id, t: row.t, y: row.y, n: row.n, s: row.s });
   }
 
   share() {
-    const row = this.list[this.index];
+    const row = this._actionRow();
     if (row) shareOrSave(this.ctx, row, { title: `${row.n || ''} ${koDateTime(row.t)}`.trim() });
   }
 
   goChat() {
-    const row = this.list[this.index];
+    const row = this._actionRow();
     if (!row || !row.k) return;
     // Push: "back" from the chat returns to this photo in the viewer.
     this.ctx.router.go(pathOf('room', row.room, 'chat'), { ym: row.ym, k: row.k });
@@ -638,8 +886,29 @@ export class MediaViewer {
       row.d ? ['길이', duration(row.d)] : null,
       ['원본', origText],
     ].filter(Boolean);
+    if (row._low) rows.push(['화질', '더 좋은 화질로 표시 중']);
+    else if (isLowQualityDup(row)) rows.push(['화질', '저화질 복사본']);
     const list = h('dl', { class: 'info-list' });
     for (const [k, v] of rows) list.append(h('dt', { text: k }), h('dd', { text: v }));
-    openSheet({ title: '정보', content: list });
+    let layer = null;
+    let lq = null;
+    if (row._low) {
+      const low = row._low;
+      const where = row.room !== low.room ? `다른 대화방('${room ? room.displayName || room.name : row.room}')` : '이 대화방';
+      lq = h('div', { class: 'info-lq' },
+        h('p', { class: 'note', text: `대화의 ${noun(low)}은 ${low.to ? '썸네일만 보관되어' : '저화질이라'}, ${where}에 있는 같은 ${noun(row)}을 더 좋은 화질로 보여주고 있어요.` }),
+        row._asked ? null : h('p', { class: 'note', text: `중요 표시·공유·대화에서 보기는 대화의 원래 ${noun(low)}에 적용돼요.` }),
+        h('button', { type: 'button', class: 'btn btn-block', onclick: () => { layer.close(); this._revert(row); } },
+          icon('lowres', 18), `대화의 원래 ${noun(low)} 보기 (저화질)`));
+    } else if (isLowQualityDup(row)) {
+      lq = h('div', { class: 'info-lq' },
+        h('p', { class: 'note info-lq-title', text: `더 좋은 화질의 ${noun(row)}이 있어요` }),
+        h('p', { class: 'note', text: row.lqs === true
+          ? `같은 ${noun(row)}의 더 좋은 화질이 이 대화방에 있어요. 사진 목록에서는 이 저화질 복사본을 숨겨요.`
+          : `같은 ${noun(row)}의 더 좋은 화질이 다른 대화방에 있어요. 전체 사진 목록에서는 이 저화질 복사본을 숨겨요.` }),
+        betterCopyId(row) ? h('button', { type: 'button', class: 'btn btn-block btn-primary', onclick: () => { layer.close(); this.openBetter(row); } },
+          icon('sparkle', 18), '더 좋은 화질 보기') : null);
+    }
+    layer = openSheet({ title: '정보', content: lq ? h('div', {}, list, lq) : list });
   }
 }

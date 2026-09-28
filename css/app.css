@@ -837,6 +837,18 @@ mark { background: color-mix(in srgb, var(--brand) 70%, transparent); color: inh
 .about-name { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; font-weight: 800; font-size: 16px; }
 .about-name img { border-radius: 8px; }
 .card .kv .seg { flex: none; }
+/* on/off switch (widgets.js toggleSwitch) */
+.switch {
+  position: relative; flex: none; width: 51px; height: 31px; padding: 0; border: 0; border-radius: 999px;
+  background: var(--surface-3); cursor: pointer; transition: background-color .2s;
+}
+.switch::after {
+  content: ''; position: absolute; left: 2px; top: 2px; width: 27px; height: 27px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); transition: transform .2s;
+}
+.switch[aria-checked="true"] { background: var(--brand-2); }
+.switch[aria-checked="true"]::after { transform: translateX(20px); }
+@media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
 .report-body .stats { margin-top: 10px; }
 .report-when { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 14px; font-weight: 650; }
 .report-rooms { display: flex; flex-direction: column; }
@@ -1001,6 +1013,11 @@ mark { background: color-mix(in srgb, var(--brand) 70%, transparent); color: inh
   -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
 }
 .vw-msg-error { background: rgba(150, 40, 25, .8); }
+.vw-msg-btn {
+  flex: none; margin-left: 2px; min-height: 32px; padding: 5px 13px; border: 0; border-radius: 999px;
+  background: var(--brand); color: var(--on-brand); font-size: 13px; font-weight: 750; white-space: nowrap;
+}
+.vw-msg-btn:active { background: var(--brand-2); }
 .vw-top, .vw-bottom, .vw-badges, .vw-nav { transition: opacity .2s; }
 .vw-top {
   position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; gap: 4px;
@@ -1014,6 +1031,10 @@ mark { background: color-mix(in srgb, var(--brand) 70%, transparent); color: inh
 .vw-btn:hover, .vw-btn:active { background: rgba(255, 255, 255, .14); }
 .vw-badges { position: absolute; top: calc(var(--safe-t) + 64px); left: 0; right: 0; display: flex; justify-content: center; pointer-events: none; }
 .vw-badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 11px; border-radius: 999px; background: rgba(0, 0, 0, .55); font-size: 12.5px; font-weight: 650; }
+.vw-badge-hq { background: rgba(247, 189, 0, .88); color: #2a1f0b; }
+.info-lq { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.info-lq .note { margin-top: 4px; }
+.info-lq .info-lq-title { color: var(--text); font-size: 14.5px; font-weight: 750; }
 .vw-bottom {
   position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-around;
   padding: 18px max(8px, var(--safe-r)) calc(var(--safe-b) + 8px) max(8px, var(--safe-l));
